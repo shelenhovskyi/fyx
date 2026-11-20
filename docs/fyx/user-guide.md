@@ -4,7 +4,7 @@ This guide is for people who install and use Fyx. If you want to write a UI exte
 [Writing a Fyx UI extension](extension-authoring.md) instead. On a Mac there is no signed
 download yet: build Fyx yourself as described in [Local Mac build](mac-build.md).
 
-It describes `origin/integration` (64d6c67f63) as of 2026-11-18. Features that are built on a stream's branch
+It describes `origin/integration` (d8d8bd3c53) as of 2026-11-20. Features that are built on a stream's branch
 but not merged into `integration` yet are marked **(coming)**.
 Features that are designed and approved but not built anywhere yet are marked **(planned)**.
 
@@ -17,9 +17,7 @@ Features that are designed and approved but not built anywhere yet are marked **
 - [Where Fyx keeps its files](#where-fyx-keeps-its-files)
 - [Troubleshooting](#troubleshooting)
 
-<!-- Base: origin/integration 64d6c67f63. (coming) sources: claude/fyx-w1-rebrand-904c67 (4b83f766d2),
-claude/fyx-w3-renderer-e20d2b (d74c8bb2ac, db6619b9f8, 0004efba01, cade516b32),
-claude/fyx-w9-fixes (3851a95912). -->
+<!-- Base: origin/integration d8d8bd3c53. Nothing is (coming) at this base. -->
 
 ## What Fyx is
 
@@ -82,26 +80,20 @@ registry agent.
 
 Fyx still connects in these cases. None of them goes to zed.dev.
 
-- **A folder is open and an AI key exists** in the environment or the keychain. The agent then
-  authenticates each provider at startup, and some providers download their model list with
-  your key (Anthropic, Google, OpenRouter, Vercel, OpenCode).
-  - **(coming)** Providers will start only when you first open the model picker or send a prompt.
-    A first prompt waits up to 20 s for a model.
-- **`GH_COPILOT_TOKEN` or `GITHUB_COPILOT_TOKEN` is set.** Copilot Chat downloads its models from
-  GitHub at startup.
-  - **(coming)** It will download them when you first use the provider.
-- **Anthropic usage events** (`/v1/log/zed`) are sent with Anthropic requests, even with
-  telemetry off.
-  - **(coming)** They will follow `telemetry.metrics`, so Fyx will not send them.
-- **LM Studio and llama.cpp** are probed on `localhost:1234` and `localhost:8080`. These
-  connections stay on your machine.
-  - **(coming)** The probes will be removed.
+- **AI providers, on first use.** With an AI key in the environment or the keychain, providers
+  start when you first open the model picker or send a prompt, not at startup. Some then download
+  their model list with your key (Anthropic, Google, OpenRouter, Vercel, OpenCode). A first prompt
+  waits up to 20 s for a model.
+- **Copilot Chat, on first use.** With `GH_COPILOT_TOKEN` or `GITHUB_COPILOT_TOKEN` set, it
+  downloads its models from GitHub when you first use the provider.
+- Anthropic usage events (`/v1/log/zed`) follow `telemetry.metrics`, which is off in Fyx, so they
+  are not sent. LM Studio and llama.cpp are no longer probed on `localhost` at startup.
 - **When you open a file:**
   - Language servers check GitHub or npm for a newer version, once per server per launch.
   - The default Prettier is installed from npm.
   - Git blame hovers load author avatars.
 
-<!-- tasks/reviews/network-audit-1.md "Verdict" and "Still phones home"; (coming): 4b83f766d2 on claude/fyx-w1-rebrand-904c67 -->
+<!-- tasks/reviews/network-audit-1.md "Verdict" and "Still phones home"; W1 4b83f766d2 -->
 
 To turn off every AI feature, including these requests, set `"disable_ai": true`.
 
@@ -286,8 +278,7 @@ style, with your theme. Each extension runs in its own sandbox:
 - no network: every connection attempt fails with "access denied";
 - at most 256 MiB of memory;
 - a time limit on every call. An extension that runs too long or crashes is disabled until you
-  restart Fyx. **(coming)** You will be able to restart it in place (see
-  [Failures and restarts](#failures-and-restarts)).
+  you restart it (see [Failures and restarts](#failures-and-restarts)).
 
 Links in an extension's markdown open only if they are `http(s)://` addresses, and only after you
 confirm the address.
@@ -331,9 +322,9 @@ Fyx asks again when the extension asks for more capabilities. It also asks again
 component changes, unless the extension is installed from a folder: then any build in that folder
 counts as enabled. Answers are kept in `fyx-ui-consent.json` in the data folder.
 
-**(coming)** Consent by tier:
+Consent by tier:
 
-- An extension that asks only for T0 capabilities (panels and status items) will load without a
+- An extension that asks only for T0 capabilities (panels and status items) loads without a
   prompt when a Fyx install dialog showed it.
 - A folder that appears without a Fyx install action keeps the one-time **Enable**.
 - After that, only an update that adds a T1 capability (reading your files or buffers) waits for
@@ -343,7 +334,7 @@ counts as enabled. Answers are kept in `fyx-ui-consent.json` in the data folder.
 checkbox each, instead of at first use. See
 [Terminals and command-line tools](#terminals-and-command-line-tools-fyxui-04).
 
-<!-- crates/ui_ext_host/src/consent.rs; registry.rs: offer_consent; (coming) cade516b32 on claude/fyx-w3-renderer-e20d2b -->
+<!-- crates/ui_ext_host/src/consent.rs; registry.rs: offer_consent; W3 cade516b32 -->
 
 ### Capability chips
 
@@ -388,22 +379,19 @@ fyx.exe --foreground
 
 ### Failures and restarts
 
-Today, an extension that crashes or runs past its time limit is disabled until you restart Fyx.
-Some errors offer **Retry**.
+An extension that crashes or runs past its time limit is stopped. You restart it in place:
 
-**(coming)** Restarting in place:
-
-- **Restart extension.** A stopped panel or status item will show the reason and
+- **Restart extension.** A stopped panel or status item shows the reason and
   **Restart extension**, which loads the extension again on a fresh instance. The command
   `fyx_ui: restart UI extension` does the same for any loaded extension.
-- **A rebuild that does not load.** If a rebuilt component does not load, the old one will keep
-  running. The surface's footer will show the error with **Retry**. The next good build will load
-  by itself and clear the error.
-- **Panels stay put.** A reload will remount the panels in place: they stay docked and open.
+- **A rebuild that does not load.** If a rebuilt component does not load, the old one keeps
+  running. The surface's footer shows the error with **Retry**. The next good build loads by
+  itself and clears the error.
+- **Panels stay put.** A reload remounts the panels in place: they stay docked and open.
 
-<!-- crates/ui_ext_host/src/view.rs: "Retry"; (coming) 0004efba01 on claude/fyx-w3-renderer-e20d2b -->
+<!-- crates/ui_ext_host/src/view.rs: "Retry"; W3 0004efba01 -->
 
-### Network access and proxies (coming, `fyx:ui` 0.3)
+### Network access and proxies (`fyx:ui` 0.3)
 
 `network:fetch`, the permission for an extension to reach the internet, comes with `fyx:ui` 0.3.
 An extension may reach only the domains it declares, and Fyx asks you the first time it does.
@@ -415,9 +403,9 @@ before it connects, and the current HTTP client cannot keep that check through a
 to `localhost` still work. Support for proxies is planned after 1.0.
 <!-- source: W2c a1c2557b27, crates/ui_ext_wasm/src/network.rs; docs/fyx/wit-0.3/design.md §8 -->
 
-### Dev folders in settings (coming)
+### Dev folders in settings
 
-`fyx_ui: install dev UI extension` will add the folder to a setting instead of linking it. The
+`fyx_ui: install dev UI extension` adds the folder to a setting instead of linking it. The
 folder stays where it is:
 
 ```json
@@ -427,9 +415,9 @@ folder stays where it is:
 - `fyx_ui: remove dev UI extension` takes a folder off the list. You can also edit the setting.
 - A folder you add to the setting by hand needs one **Enable**.
 
-<!-- (coming) db6619b9f8 on claude/fyx-w3-renderer-e20d2b -->
+<!-- W3 db6619b9f8 -->
 
-### Packages, updates, rollback and pinning (coming)
+### Packages, updates, rollback and pinning
 
 A `.fyxext` file is a packaged UI extension. It is a zip of `extension.toml`, the component and
 optional assets.
@@ -448,7 +436,7 @@ optional assets.
   folder.
 - Signed packages from a Fyx registry come later.
 
-<!-- (coming) d74c8bb2ac on claude/fyx-w3-renderer-e20d2b: install_store.rs, store_actions.rs -->
+<!-- W3 d74c8bb2ac: install_store.rs, store_actions.rs -->
 
 ## Terminals and command-line tools (`fyx:ui` 0.4)
 
@@ -672,7 +660,7 @@ Limits that stay until a later step:
 
 Network control, placeholder secrets and an OS sandbox for agents are planned for later steps.
 
-<!-- docs/fyx/security-modes.md "Known limits of step 1"; tasks/reviews/w9-step1.md F2-F4; (coming) claude/fyx-w9-fixes 3851a95912 -->
+<!-- docs/fyx/security-modes.md "Known limits of step 1"; tasks/reviews/w9-step1.md F2-F4; W9 3851a95912 -->
 
 ## Where Fyx keeps its files
 
@@ -691,7 +679,7 @@ Inside the data folder:
 |---|---|
 | `extensions/installed/` | Installed extensions, including linked UI extension folders |
 | `fyx-ui-consent.json` | Your **Enable** answers for UI extensions |
-| `extensions/fyx/` | **(coming)** The UI extension install store: one folder per version, plus `state.json` with the active, previous and pinned version of each extension |
+| `extensions/fyx/` | The UI extension install store: one folder per version, plus `state.json` with the active, previous and pinned version of each extension |
 | `extensions/fyx/journal/<id>.jsonl` | **(0.4)** What an extension did: the last 2000 entries or 30 days; removed with the extension |
 
 In each project, at the root of a worktree:
@@ -728,9 +716,8 @@ start with these prefixes:
 - Two extensions cannot use the same id. The second one is refused, with an error in the log.
 - `FYX_UI_DEV_EXTENSIONS` is read only at startup. Set it in the same shell that starts Fyx.
 
-**A panel shows an error.** An extension that crashes or runs past its time limit is disabled.
-Restart Fyx to load it again. Some errors offer **Retry**. **(coming)** Use **Restart extension**
-or `fyx_ui: restart UI extension` instead of restarting Fyx.
+**A panel shows an error.** An extension that crashes or runs past its time limit is stopped.
+Use **Restart extension** or `fyx_ui: restart UI extension`; some errors offer **Retry**.
 
 **Agent edits land without a review.**
 
