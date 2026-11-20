@@ -418,6 +418,9 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
             id,
             outcome.map(wit_review_outcome),
         ))),
+        net::IoEvent::ReviewComments(comments) => Some(wit_io::IoEvent::ReviewComments(
+            wit_review_comments(comments),
+        )),
         net::IoEvent::RelayRequest(request) => Some(wit_io::IoEvent::RelayRequest((
             request.id,
             request.channel,
@@ -1598,6 +1601,29 @@ fn wit_review_outcome(outcome: ui_ext::review::ReviewOutcome) -> wit_review::Rev
             Decision::Rejected => wit_review::Decision::Rejected,
         },
         final_content: outcome.final_content,
+    }
+}
+
+fn wit_review_comments(comments: ui_ext::review::ReviewComments) -> wit_review::ReviewComments {
+    use ui_ext::review::CommentState;
+    wit_review::ReviewComments {
+        session: comments.session,
+        comments: comments
+            .comments
+            .into_iter()
+            .map(|comment| wit_review::ReviewComment {
+                path: wit_file_ref(comment.path),
+                lines: comment.lines,
+                state: match comment.state {
+                    CommentState::Accepted => wit_review::CommentState::Accepted,
+                    CommentState::Rejected => wit_review::CommentState::Rejected,
+                    CommentState::Pending => wit_review::CommentState::Pending,
+                },
+                excerpt: comment.excerpt,
+                text: comment.text,
+            })
+            .collect(),
+        prompt: comments.prompt,
     }
 }
 

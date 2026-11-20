@@ -202,7 +202,10 @@ async fn user_settings_file_store_reads_and_writes_fyx_extensions(cx: &mut TestA
             Value::Object(store.user_values("acme.todo", cx)),
             json!({ "limit": 5 })
         );
-        assert!(store.user_values("acme.bad", cx).is_empty(), "not an object");
+        assert!(
+            store.user_values("acme.bad", cx).is_empty(),
+            "not an object"
+        );
         assert!(store.user_values("acme.none", cx).is_empty());
         // Nothing is loaded, so nothing declares a setting.
         assert!(store.specs("acme.todo", cx).is_empty());
@@ -234,5 +237,8 @@ async fn user_settings_file_store_reads_and_writes_fyx_extensions(cx: &mut TestA
     cx.update(|cx| store.write("acme.todo", SettingsEdit::ResetAll, cx));
     cx.run_until_parked();
     let text = written(&fs);
-    assert!(!text.contains("acme.todo"), "reset all removes the object: {text}");
+    assert!(
+        !text.contains("acme.todo"),
+        "reset all removes the object: {text}"
+    );
 }

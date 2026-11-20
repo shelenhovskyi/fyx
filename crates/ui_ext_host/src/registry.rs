@@ -2207,8 +2207,7 @@ Environment it may pass: {}",
                         .ok();
                     let options = LoadOptions {
                         // Plan 6.1: the user's values, from the user settings file only.
-                        user_settings: cx
-                            .update(|cx| user_settings(&found.extension_id, cx)),
+                        user_settings: cx.update(|cx| user_settings(&found.extension_id, cx)),
                         cache: found.cache.clone(),
                         capability_check: checker,
                         allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
