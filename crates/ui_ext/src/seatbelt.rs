@@ -28,6 +28,9 @@ pub enum SpawnNetwork {
     Blocked,
     /// Only Fyx's HTTP(S) proxy on `localhost:<port>`; the proxy enforces the host list.
     Proxy { port: u16 },
+    /// Any host: for programs whose hosts are not declared (an opted-in MCP server's sandbox
+    /// confines its files only).
+    Open,
 }
 
 /// What one spawned program may touch.
@@ -188,6 +191,12 @@ pub fn profile(sandbox: &SpawnSandbox, toolchain: &[PathBuf]) -> String {
     }
     match sandbox.network {
         SpawnNetwork::Blocked => {}
+        SpawnNetwork::Open => {
+            profile.push_str("
+(allow network*)
+");
+            profile.push_str(NETWORK_SERVICES);
+        }
         SpawnNetwork::Proxy { port } => {
             // Seatbelt takes only `*` or `localhost` as the host of a `remote tcp` rule.
             profile.push_str(&format!(
@@ -247,6 +256,14 @@ mod tests {
             protected: vec![PathBuf::from("/Users/me/project/.git/hooks")],
             network,
         }
+    }
+
+    #[test]
+    fn open_network_allows_any_host() {
+        let profile = profile(&sandbox(SpawnNetwork::Open), &[]);
+        assert!(profile.contains("(allow network*)"));
+        assert!(profile.contains("com.apple.trustd"));
+        assert!(!profile.contains("localhost:"));
     }
 
     #[test]

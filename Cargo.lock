@@ -19666,6 +19666,7 @@ dependencies = [
  "anyhow",
  "async_zip",
  "collections",
+ "context_server",
  "editor",
  "extension_host",
  "fs",

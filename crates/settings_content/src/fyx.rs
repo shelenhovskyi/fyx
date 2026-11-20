@@ -89,6 +89,37 @@ pub struct FyxSettingsContent {
     /// Local history of files and agent turns (`crates/fyx_history_host`,
     /// `docs/fyx/platform/local-history.md`).
     pub history: Option<FyxHistorySettingsContent>,
+    /// The macOS sandbox for stdio MCP servers (`crates/ui_ext_host/src/mcp_sandbox.rs`, plan 7.5).
+    pub mcp_sandbox: Option<FyxMcpSandboxSettingsContent>,
+}
+
+/// `fyx.mcp_sandbox`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxMcpSandboxSettingsContent {
+    /// On macOS, start every stdio MCP server (`context_servers` with a `command`) under a
+    /// Seatbelt profile: it can read and write its project folder and its own temporary folder,
+    /// read the rest of your home folder and the system, and reach any host. It cannot write
+    /// anywhere else in your home folder (shell profiles, `~/.ssh`, other projects). Servers that
+    /// keep a cache in your home folder (`npx`, `uvx`) need that folder in `writable`. Other
+    /// systems ignore this setting.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// Per-server changes, keyed by the server's name under `context_servers`.
+    pub servers: Option<HashMap<String, FyxMcpServerSandboxContent>>,
+}
+
+/// One entry of `fyx.mcp_sandbox.servers`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxMcpServerSandboxContent {
+    /// Sandbox this server or not, whatever `fyx.mcp_sandbox.enabled` says.
+    pub enabled: Option<bool>,
+    /// More folders it may write (absolute, or starting with `~/`), such as `~/.npm`.
+    pub writable: Option<Vec<String>>,
+    /// More folders it may read outside your home folder.
+    pub readable: Option<Vec<String>>,
 }
 
 /// `fyx.history`.

@@ -22,6 +22,7 @@ agent_review.workspace = true
 anyhow.workspace = true
 async_zip.workspace = true
 collections.workspace = true
+context_server.workspace = true
 editor.workspace = true
 extension_host.workspace = true
 fs.workspace = true

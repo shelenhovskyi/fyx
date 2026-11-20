@@ -26,6 +26,7 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     pub fn new(
+        server_id: &str, // fyx: plan 7.5
         binary: ModelContextServerBinary,
         working_directory: &Option<PathBuf>,
         cx: &AsyncApp,
@@ -42,7 +43,13 @@ impl StdioTransport {
             command.current_dir(working_directory);
         }
         // fyx: plan 7.5, Fyx may confine the server (crate::fyx_sandbox).
-        let command = crate::fyx_sandbox::wrap(command, working_directory.as_deref())?;
+        let command = crate::fyx_sandbox::wrap(
+            command,
+            crate::fyx_sandbox::StdioServer {
+                id: server_id,
+                working_directory: working_directory.as_deref(),
+            },
+        )?;
 
         let mut server = Child::spawn(
             command,
