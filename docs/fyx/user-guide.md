@@ -12,7 +12,7 @@ Features that are designed and approved but not built anywhere yet are marked **
 - [Privacy defaults](#privacy-defaults)
 - [Reviewing agent changes](#reviewing-agent-changes)
 - [UI extensions](#ui-extensions)
-- [Terminals and command-line tools (planned)](#terminals-and-command-line-tools-planned-fyxui-04)
+- [Terminals and command-line tools](#terminals-and-command-line-tools-fyxui-04)
 - [Security modes for agents](#security-modes-for-agents)
 - [Where Fyx keeps its files](#where-fyx-keeps-its-files)
 - [Troubleshooting](#troubleshooting)
@@ -339,9 +339,9 @@ counts as enabled. Answers are kept in `fyx-ui-consent.json` in the data folder.
 - After that, only an update that adds a T1 capability (reading your files or buffers) waits for
   **Approve**. `fyx_ui: revoke UI extension permission` takes a T1 grant back.
 
-**(planned, 0.4)** Fyx 0.4 changes this for the powerful items: they are accepted at install, one
+**(0.4)** Fyx 0.4 changes this for the powerful items: they are accepted at install, one
 checkbox each, instead of at first use. See
-[Terminals and command-line tools](#terminals-and-command-line-tools-planned-fyxui-04).
+[Terminals and command-line tools](#terminals-and-command-line-tools-fyxui-04).
 
 <!-- crates/ui_ext_host/src/consent.rs; registry.rs: offer_consent; (coming) cade516b32 on claude/fyx-w3-renderer-e20d2b -->
 
@@ -450,28 +450,32 @@ optional assets.
 
 <!-- (coming) d74c8bb2ac on claude/fyx-w3-renderer-e20d2b: install_store.rs, store_actions.rs -->
 
-## Terminals and command-line tools (planned, `fyx:ui` 0.4)
+## Terminals and command-line tools (`fyx:ui` 0.4)
 
-**Everything in this section is planned, not built.** It describes what Fyx 0.4 will do, from
-[the design](wit-0.4/design.md) that the owner approved on 2026-11-19. Nothing here is on
-`integration` yet, and the details may change before it ships.
+This section describes `integration` at d8d8bd3c53 (2026-11-20), built from
+[the 0.4 design](wit-0.4/design.md). `fyx:ui` 0.4 is not frozen yet, so it loads only in Dev
+builds, and 0.4 extensions install from a folder (**Install Dev Extension…**), not from the
+registry. Not built yet: Fyx profiles (below), and shell integration in zsh, fish and SSH
+terminals.
 
-Fyx will make your terminal a good home for tools like Claude Code, Gemini CLI and Codex. Fyx has
+Fyx makes your terminal a good home for tools like Claude Code, Gemini CLI and Codex. Fyx has
 no code of its own for any one tool: each tool gets an extension, and the extension asks you for
 what it needs.
 
-### What you will see without installing anything
+### What you see without installing anything
 
 - **State on the terminal tab.** A tool that reports its state (Claude Code 2.1.295 and later, and
-  Codex when it ships it) will show **working**, **needs you** or **done** on its tab, with no
+  Codex when it ships it) shows **working**, **needs you** or **done** on its tab, with no
   extension and no setting. Fyx always writes who reported it ("from Claude Code via OSC 7501").
 - **An agent sessions panel.** It lists every terminal that has a state, with the ones that need
   you first. A click takes you to the terminal, and Fyx notifies you when a tool is blocked or
   done while the window is in the background.
+- **Shell integration** in local PowerShell and Git Bash terminals: Fyx knows where each command
+  and its output start, so "the last command and its output" can be shared (below).
 
 ### Installing an extension: one checkbox for each power
 
-When you install an extension (from a file or, later, from the registry), the dialog has four
+When you install an extension (from a folder for now, later from the registry), the dialog has four
 groups, named by how consent works:
 
 1. **Shows in Fyx.** Panels and status items. Nothing to decide.
@@ -511,7 +515,8 @@ When an extension updates, see [Updates show what changed](#updates-show-what-ch
 below. **When you turn an item off or
 remove the extension, everything stops at once:** terminals it started are killed with their
 processes, its listeners close, its files are removed, its hooks answer as if Fyx were closed, and
-its environment variables leave new terminals (terminals already open show **Restart to apply**).
+its environment variables leave new terminals (terminals already open keep them until you
+restart them).
 
 Extensions you install without a dialog (the `FYX_UI_DEV_EXTENSIONS` variable, dev builds only)
 keep today's behaviour: the first use of a power asks.
@@ -581,7 +586,7 @@ keeps them apart without ever touching them:
 - Extensions cannot choose, read or change an account, and the registry does not accept extensions
   that rotate accounts, get around limits or share access.
 
-**Fyx profiles.** A Fyx profile is a separate copy of Fyx's data: settings, keymap, themes,
+**Fyx profiles (planned).** A Fyx profile will be a separate copy of Fyx's data: settings, keymap, themes,
 extensions, history and accounts, run as its own process (the same as `fyx --user-data-dir`, with
 a manager). You create an empty profile, a copy, or one from a template, with a name, a colour and
 an icon. Fyx asks which to open at start when you have more than one, shows the profile's name and
@@ -593,7 +598,7 @@ them.
 The agent panel talks to Claude through Zed's own adapter, the same as upstream Zed. Anthropic's
 terms say products built on the Agent SDK should use API keys; Fyx follows upstream here.
 
-<!-- docs/fyx/wit-0.4/design.md §A (foundation), §B.4-B.9, §C.1-§C.6; plan P5 tasks 5.1-5.20; none of it is built yet -->
+<!-- docs/fyx/wit-0.4/design.md §A (foundation), §B.4-B.9, §C.1-§C.6; plan P5 tasks 5.1-5.20; built on integration d8d8bd3c53 except Fyx profiles and zsh/fish/SSH shell integration; UI strings: ui_ext_host consent_dialog.rs, t3_cards.rs, terminal_host -->
 
 ## Security modes for agents
 
@@ -687,7 +692,7 @@ Inside the data folder:
 | `extensions/installed/` | Installed extensions, including linked UI extension folders |
 | `fyx-ui-consent.json` | Your **Enable** answers for UI extensions |
 | `extensions/fyx/` | **(coming)** The UI extension install store: one folder per version, plus `state.json` with the active, previous and pinned version of each extension |
-| `extensions/fyx/journal/<id>.jsonl` | **(planned, 0.4)** What an extension did: the last 2000 entries or 30 days; removed with the extension |
+| `extensions/fyx/journal/<id>.jsonl` | **(0.4)** What an extension did: the last 2000 entries or 30 days; removed with the extension |
 
 In each project, at the root of a worktree:
 
