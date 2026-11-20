@@ -1123,6 +1123,20 @@ choices = [{ value = "bash", title = "Bash" }, { value = "pwsh", title = "PowerS
     assert_eq!(changed, ["scrollback", "shell"]);
     assert!(!harness.deliver_io().expect("delivers").is_empty());
     assert!(harness.take_settings_changed().is_empty());
+    // The demo read each changed key back through the SDK's `settings::get`.
+    let logged: Vec<&str> = harness
+        .logs()
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.starts_with("setting "))
+        .collect();
+    assert_eq!(
+        logged,
+        [
+            "setting scrollback = Integer(500)",
+            "setting shell = Choice(\"bash\")"
+        ]
+    );
 
     // A broken declaration refuses the package.
     std::fs::write(&manifest, text.replace("default = 1000", "default = 5")).unwrap();
@@ -1131,4 +1145,165 @@ choices = [{ value = "bash", title = "Bash" }, { value = "pwsh", title = "PowerS
         Harness::load_package(&package).err().expect("refused")
     );
     assert!(error.contains("outside 100..=10000"), "{error}");
+}
+fn editor_selection(path: &str, line: u32, text: Option<&str>) -> ui_ext::context::EditorContext {
+    let file = ui_ext::process::FileRef {
+        worktree: Some(1),
+        path: path.to_owned(),
+    };
+    let at = |line| ui_ext::edit::Position { line, column: 0 };
+    ui_ext::context::EditorContext {
+        active: Some(file.clone()),
+        open: vec![file],
+        selection: Some((
+            ui_ext::edit::TextRange {
+                start: at(line),
+                end: at(line + 3),
+            },
+            text.map(str::to_owned),
+        )),
+        trusted: Some(true),
+    }
+}
+
+/// Plan 6.6 (design.md §E.4): the lint demo publishes the `TODO`s of a selection as warnings
+/// under no source of its own, a private file publishes nothing, and Clear clears every file.
+#[test]
+#[ignore = "needs W0's workspace members for fyx_demo_lint and fyx_demo_bookmarks; then add both to DEMOS_V0_4"]
+fn the_lint_demo_publishes_the_todos_of_a_selection() {
+    let mut harness = Harness::load_package(demo_package("fyx_demo_lint")).expect("loads");
+    harness.set_worktrees(&[(1, "/work")]);
+    harness.set_private_file(1, ".env");
+    harness.mount("lint").expect("mounts");
+    harness.deliver_io().expect("watching starts");
+
+    harness.set_editor_context(editor_selection(
+        "src/main.rs",
+        4,
+        Some("// TODO: name it\nlet x = 1;\n    TODO\n"),
+    ));
+    harness.deliver_io().expect("deliver");
+    let published = harness.published_diagnostics();
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(published[0].path.path, "src/main.rs");
+    let entries: Vec<_> = published[0]
+        .diagnostics
+        .iter()
+        .map(|entry| {
+            (
+                entry.range.start.line,
+                entry.range.start.column,
+                entry.severity,
+                entry.message.as_str(),
+                entry.source.as_deref(),
+            )
+        })
+        .collect();
+    use ui_ext::context::DiagnosticSeverity::Warning;
+    assert_eq!(
+        entries,
+        [
+            (4, 3, Warning, "TODO: name it", None),
+            (6, 4, Warning, "TODO", None)
+        ]
+    );
+    let list = harness
+        .find("lint", |props| matches!(props, model::Props::List(_)))
+        .expect("a list");
+    assert_eq!(harness.rows("lint", list, 0, 10).expect("rows").len(), 2);
+
+    // A private file has no selection text: nothing is published for it.
+    harness.set_editor_context(editor_selection(".env", 0, None));
+    harness.deliver_io().expect("deliver");
+    assert_eq!(harness.published_diagnostics().len(), 1);
+
+    // A selection without a TODO clears its file.
+    harness.set_editor_context(editor_selection("src/main.rs", 0, Some("fn main() {}")));
+    harness.deliver_io().expect("deliver");
+    assert!(harness.published_diagnostics().is_empty());
+
+    harness.set_editor_context(editor_selection("a.rs", 0, Some("TODO")));
+    harness.deliver_io().expect("deliver");
+    assert_eq!(harness.published_diagnostics().len(), 1);
+    harness.click("lint", "Clear").expect("clear");
+    assert!(harness.published_diagnostics().is_empty());
+}
+
+/// Plan 6.7 (design.md §F.5): the bookmarks demo badges a bookmarked file, shows a two-level
+/// tree whose folder rows fold on `row-toggled`, and removes the badge with the bookmark.
+#[test]
+#[ignore = "needs W0's workspace members for fyx_demo_lint and fyx_demo_bookmarks; then add both to DEMOS_V0_4"]
+fn the_bookmarks_demo_is_a_tree_with_badges() {
+    let mut harness = Harness::load_package(demo_package("fyx_demo_bookmarks")).expect("loads");
+    harness.set_worktrees(&[(1, "/work")]);
+    harness.mount("bookmarks").expect("mounts");
+    harness.deliver_io().expect("watching starts");
+    for path in ["src/main.rs", "src/lib.rs", "README.md"] {
+        harness.set_editor_context(editor_selection(path, 0, None));
+        harness.deliver_io().expect("deliver");
+        let name = path.rsplit('/').next().expect("a name");
+        harness
+            .click("bookmarks", &format!("Bookmark {name}"))
+            .expect("bookmark");
+    }
+    let badges: Vec<_> = harness
+        .file_decorations()
+        .into_iter()
+        .map(|decoration| (decoration.path.path, decoration.badge))
+        .collect();
+    assert_eq!(
+        badges,
+        [
+            ("src/main.rs".to_owned(), Some("\u{2605}".to_owned())),
+            ("src/lib.rs".to_owned(), Some("\u{2605}".to_owned())),
+            ("README.md".to_owned(), Some("\u{2605}".to_owned())),
+        ]
+    );
+
+    let list = harness
+        .find("bookmarks", |props| matches!(props, model::Props::List(_)))
+        .expect("a list");
+    let shape = |harness: &mut Harness| {
+        harness
+            .tree_rows("bookmarks", list, 0, 20)
+            .expect("rows")
+            .into_iter()
+            .map(|row| (row.row.indent, row.expansion))
+            .collect::<Vec<_>>()
+    };
+    use crate::Expansion::{Collapsed, Expanded, Leaf};
+    assert_eq!(
+        shape(&mut harness),
+        [
+            (0, Expanded),
+            (1, Leaf),
+            (0, Expanded),
+            (1, Leaf),
+            (1, Leaf)
+        ]
+    );
+
+    // Collapsing `src/` (row 2) asks for its rows again.
+    let outcome = harness
+        .toggle_row("bookmarks", list, 2, false)
+        .expect("toggle");
+    assert!(
+        outcome.invalidated.iter().any(|op| op.target == list),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        shape(&mut harness),
+        [(0, Expanded), (1, Leaf), (0, Collapsed)]
+    );
+    harness
+        .toggle_row("bookmarks", list, 2, true)
+        .expect("toggle");
+    assert_eq!(shape(&mut harness).len(), 5);
+
+    // README.md is still the active file: its button removes the bookmark and the badge.
+    harness
+        .click("bookmarks", "Remove README.md")
+        .expect("remove");
+    assert_eq!(harness.file_decorations().len(), 2);
+    assert_eq!(shape(&mut harness), [(0, Expanded), (1, Leaf), (1, Leaf)]);
 }

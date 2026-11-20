@@ -227,3 +227,4 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `row_range` | fn | The row indices of a `list-rows(start, count)` request that exist in a list of `row_count` rows. The host may ask past the end while the list shrinks. |
 | `settings` | module |  |
 | `terminals` | module |  |
+| `tree_row` | fn | fyx:ui 0.4 (plan 6.7): a row of a tree. The host draws `indent` levels and a chevron for `expansion` (an empty slot for `Expansion::Leaf`); a click on it, Right or Left sends `UiEvent::RowToggled((list, index, expand))`. The host changes no rows itself: answer with the new `row-count` and invalidate the rows from the toggled one on. |

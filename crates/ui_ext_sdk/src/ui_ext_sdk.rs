@@ -529,6 +529,7 @@ macro_rules! __fyx_host_shims {
             $crate::__fyx_context_shims!($world);
             $crate::__fyx_review_shims!($world);
             $crate::__fyx_relay_shims!($world);
+            $crate::__fyx_settings_shims!($world);
         };
     };
 }
@@ -944,6 +945,35 @@ macro_rules! __fyx_context_shims {
         ) -> ::std::result::Result<(), $crate::HostError> {
             $crate::__private::context::$world::watch_diagnostics(on)
         }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_publish_diagnostics(
+            path: &$crate::FileRef,
+            diagnostics: &[$crate::context::Diagnostic],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::publish_diagnostics(path, diagnostics)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_clear_diagnostics(
+            path: ::std::option::Option<&$crate::FileRef>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::clear_diagnostics(path)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_decorate_files(
+            decorations: &[$crate::context::FileDecoration],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::decorate_files(decorations)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_clear_file_decorations(
+            paths: ::std::option::Option<&[$crate::FileRef]>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::clear_file_decorations(paths)
+        }
     };
 }
 
@@ -1023,6 +1053,41 @@ macro_rules! __fyx_relay_shims {
     ($world:ident) => {};
 }
 
+/// The shims of the 0.4 [`settings`] functions; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_settings_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_get(
+            key: &str,
+        ) -> ::std::result::Result<$crate::settings::SettingValue, $crate::HostError> {
+            $crate::__private::settings::$world::get(key)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_all()
+        -> ::std::result::Result<::std::vec::Vec<$crate::settings::Setting>, $crate::HostError> {
+            $crate::__private::settings::$world::all()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_open(
+            key: ::std::option::Option<&str>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::settings::$world::open(key)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_settings_shims {
+    ($world:ident) => {};
+}
+
 #[doc(hidden)]
 pub mod __private {
     use super::*;
@@ -1036,6 +1101,8 @@ pub mod __private {
     pub use crate::relay::glue as relay;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::review::glue as review;
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::settings::glue as settings;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::terminals::glue as terminals;
     pub use crate::v0_1::glue as v0_1;
@@ -1239,6 +1306,23 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
     {
         return Err(TreeError::CanvasInRow);
     }
+    Ok(row)
+}
+
+/// fyx:ui 0.4 (plan 6.7): a row of a tree. The host draws `indent` levels and a chevron for
+/// `expansion` (an empty slot for `Expansion::Leaf`); a click on it, Right or Left sends
+/// `UiEvent::RowToggled((list, index, expand))`. The host changes no rows itself: answer with the
+/// new `row-count` and invalidate the rows from the toggled one on.
+#[cfg(feature = "fyx-ui-0-4")]
+pub fn tree_row(
+    index: u32,
+    indent: u8,
+    expansion: Expansion,
+    build: impl FnOnce(&mut TreeBuilder),
+) -> Result<ListRow, TreeError> {
+    let mut row = list_row(index, build)?;
+    row.indent = indent;
+    row.expansion = expansion;
     Ok(row)
 }
 
@@ -3160,6 +3244,27 @@ mod tests {
         assert_eq!(row.nodes[0].parent, None);
         assert_eq!(row.nodes[1].parent, Some(ROW_NODE_ID_BASE));
         assert_eq!(row.nodes[1].props, text("row 2"));
+    }
+
+    #[cfg(feature = "fyx-ui-0-4")]
+    #[test]
+    fn tree_rows_carry_indent_and_expansion() {
+        let row = tree_row(4, 2, Expansion::Collapsed, |tree| {
+            tree.text("src");
+        })
+        .unwrap();
+        assert_eq!((row.index, row.indent), (4, 2));
+        assert_eq!(row.expansion, Expansion::Collapsed);
+        assert_eq!(row.nodes[0].props, text("src"));
+        assert_eq!(
+            list_row(0, |tree| {
+                tree.text("a");
+            })
+            .unwrap()
+            .expansion,
+            Expansion::Leaf
+        );
+        assert!(tree_row(0, 0, Expansion::Leaf, |_| {}).is_err());
     }
 
     #[test]

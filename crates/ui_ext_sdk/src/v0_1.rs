@@ -603,6 +603,8 @@ mod tests {
                 parent: None,
                 props: Props::Text(crate::TextProps::new("row")),
             }],
+            #[cfg(feature = "fyx-ui-0-4")]
+            expansion: crate::Expansion::Leaf,
         }]);
         assert_eq!(rows[0].index, 4);
         assert_eq!(
