@@ -17,6 +17,9 @@ pub struct ExtensionSettings {
     pub auto_update_extensions: HashMap<Arc<str>, bool>,
     pub suggest_extensions: bool,
     pub granted_capabilities: Vec<ExtensionCapability>,
+    /// fyx: `fyx.extensions.zed_registry_url`, the base URL of Zed's extension registry. `None`
+    /// (empty or missing) builds it from `server_url`, as upstream does.
+    pub zed_registry_url: Option<String>,
 }
 
 impl ExtensionSettings {
@@ -62,6 +65,11 @@ impl Settings for ExtensionSettings {
                     }
                 })
                 .collect(),
+            zed_registry_url: content // fyx: Zed's registry while Zed's cloud is off
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.zed_registry_url.clone()),
         }
     }
 }

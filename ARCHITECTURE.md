@@ -68,6 +68,8 @@ components on its own wasmtime engine, so `extension_host` carries no Fyx code.
 | `.cargo/config.toml` | sccache, lighter dev debug info | W0 |
 | `crates/workspace` | dynamic panel registration from the extension host | W3 |
 | `crates/extensions_ui` | capability chips on a UI extension's card (`ui_ext_host::capability_chips`) | W3 |
+| `crates/extension_host` | Zed's registry from `fyx.extensions.zed_registry_url` (`fyx_zed_registry.rs`), no update check with nothing to update | W1 |
+| `crates/settings_content` | `fyx.rs`: settings of Fyx crates, `fyx.extensions.zed_registry_url` among them | W0 |
 | `crates/zed` | `ui_ext_host::init`, `agent_review::init`; brand/paths | W1, W3 |
 | `crates/acp_thread` / `agent_ui` | route permission requests into `agent_review` | W5 |
 | `crates/editor` | decoration hook | W6 |
