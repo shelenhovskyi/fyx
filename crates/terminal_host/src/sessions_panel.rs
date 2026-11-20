@@ -51,7 +51,7 @@ pub struct AgentSessionsPanel {
 }
 
 impl AgentSessionsPanel {
-    fn new(
+    pub(crate) fn new(
         workspace: WeakEntity<Workspace>,
         sessions: Entity<Sessions>,
         cx: &mut Context<Self>,
@@ -85,7 +85,7 @@ impl AgentSessionsPanel {
 
     /// Deferred: the terminal panel can share this panel's dock, and focusing it deactivates this
     /// panel, which cannot be updated while its own click handler runs.
-    fn jump_to(
+    pub(crate) fn jump_to(
         &mut self,
         view: &Entity<TerminalView>,
         window: &mut Window,

@@ -1895,6 +1895,9 @@ pub(crate) fn fyx_menu(menu: ContextMenu, entries: Vec<terminal_ext::MenuEntry>)
             None,
             move |window, cx| on_select(window, cx),
         ),
+        terminal_ext::MenuEntry::Submenu { label, entries } => {
+            menu.submenu(label, move |menu, _, _| fyx_menu(menu, entries.clone()))
+        }
     })
 }
 

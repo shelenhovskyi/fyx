@@ -16,7 +16,7 @@
 //! account's dir (the presets' and the user's `fyx.accounts.tools`) are dropped whatever the
 //! manifest check let through.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -285,6 +285,9 @@ fn listeners_of<'a>(
 struct ProfileItem {
     ext: String,
     profile: String,
+    /// The header the entry sits under ("Open Claude Code as…"), `None` for a profile without
+    /// accounts.
+    group: Option<String>,
     label: String,
     /// `<tool>=<name>`, or `None` for the project's account (if any).
     account_choice: Option<String>,
@@ -306,6 +309,13 @@ fn profile_items(
     settings: &FyxAccountsSettingsContent,
 ) -> Vec<ProfileItem> {
     let accounts = settings.accounts();
+    // The extension's name only tells apart profiles of the same name.
+    let mut names = HashMap::<&str, usize>::default();
+    for (_, integration) in integrations {
+        for profile in &integration.profiles {
+            *names.entry(profile.name.as_str()).or_default() += 1;
+        }
+    }
     let mut items = Vec::new();
     for (ext, integration) in integrations {
         for profile in &integration.profiles {
@@ -316,7 +326,11 @@ fn profile_items(
             } else {
                 " (runs any command you type)"
             };
-            let base = format!("{} — {}", profile.name, integration.extension_name);
+            let name = if names.get(profile.name.as_str()).is_some_and(|count| *count > 1) {
+                format!("{} ({})", profile.name, integration.extension_name)
+            } else {
+                profile.name.clone()
+            };
             let tool_accounts = profile
                 .account_tool
                 .as_deref()
@@ -331,7 +345,8 @@ fn profile_items(
                 items.push(ProfileItem {
                     ext: ext.clone(),
                     profile: profile.id.clone(),
-                    label: format!("{base}{marker}"),
+                    group: None,
+                    label: format!("Open {name}{marker}"),
                     account_choice: None,
                 });
             }
@@ -339,10 +354,8 @@ fn profile_items(
                 items.push(ProfileItem {
                     ext: ext.clone(),
                     profile: profile.id.clone(),
-                    label: format!(
-                        "{} — {} — {}{marker}",
-                        profile.name, account.name, integration.extension_name
-                    ),
+                    group: Some(format!("Open {name} as…")),
+                    label: format!("{}{marker}", account.name),
                     account_choice: Some(accounts::account_choice(account)),
                 });
             }
@@ -358,10 +371,18 @@ pub(crate) fn menu_entries(cx: &App) -> Vec<MenuEntry> {
     if items.is_empty() {
         return Vec::new();
     }
-    let mut entries = vec![MenuEntry::Separator, MenuEntry::Header("Profiles".into())];
-    entries.extend(items.into_iter().map(|item| {
+    let mut entries = Vec::new();
+    let mut group = None;
+    for item in items {
+        if entries.is_empty() || item.group != group {
+            entries.push(MenuEntry::Separator);
+            if let Some(header) = &item.group {
+                entries.push(MenuEntry::Header(header.clone().into()));
+            }
+            group = item.group.clone();
+        }
         let label = SharedString::from(item.label.clone());
-        MenuEntry::Entry {
+        entries.push(MenuEntry::Entry {
             label,
             on_select: Rc::new(move |window, cx| {
                 launch(
@@ -372,8 +393,8 @@ pub(crate) fn menu_entries(cx: &App) -> Vec<MenuEntry> {
                     cx,
                 )
             }),
-        }
-    }));
+        });
+    }
     entries
 }
 
@@ -776,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn profiles_with_an_account_tool_get_one_entry_per_account() {
+    fn profiles_with_an_account_tool_get_one_entry_per_account_under_their_header() {
         let mut other = integration(&[]);
         other.extension_name = "Shells".into();
         other.profiles = vec![TerminalProfile {
@@ -793,14 +814,24 @@ mod tests {
         );
         let labels = items
             .iter()
-            .map(|item| (item.label.as_str(), item.account_choice.as_deref()))
+            .map(|item| {
+                (
+                    item.group.as_deref(),
+                    item.label.as_str(),
+                    item.account_choice.as_deref(),
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
             [
-                ("Claude Code — Personal — Claude", Some("claude=Personal")),
-                ("Claude Code — Work — Claude", Some("claude=Work")),
-                ("Bash — Shells (runs any command you type)", None),
+                (
+                    Some("Open Claude Code as…"),
+                    "Personal",
+                    Some("claude=Personal")
+                ),
+                (Some("Open Claude Code as…"), "Work", Some("claude=Work")),
+                (None, "Open Bash (runs any command you type)", None),
             ]
         );
         let mut scripted = integration(&[]);
@@ -827,16 +858,31 @@ mod tests {
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
             [
-                "Shell -c — Shells (runs the command in its arguments)",
-                "Shell -e — Shells (runs the command in its arguments)",
-                "Shell /C — Shells (runs the command in its arguments)",
+                "Open Shell -c (runs the command in its arguments)",
+                "Open Shell -e (runs the command in its arguments)",
+                "Open Shell /C (runs the command in its arguments)",
             ]
         );
         let no_accounts = profile_items(
             &[("claude".into(), Arc::new(integration(&[])))],
             &FyxAccountsSettingsContent::default(),
         );
-        assert_eq!(no_accounts[0].label, "Claude Code — Claude");
+        assert_eq!(no_accounts[0].label, "Open Claude Code");
+        let same_name = profile_items(
+            &[
+                ("claude".into(), Arc::new(integration(&[]))),
+                ("other".into(), Arc::new(integration(&[]))),
+            ],
+            &FyxAccountsSettingsContent::default(),
+        );
+        assert_eq!(
+            same_name
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Open Claude Code (Claude)", "Open Claude Code (Claude)"],
+            "two profiles of the same name name their extensions"
+        );
     }
 
     #[test]

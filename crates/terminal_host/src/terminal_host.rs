@@ -9,6 +9,8 @@ mod host;
 mod notification;
 mod profiles;
 mod pseudo;
+#[cfg(test)]
+mod reentrancy_tests;
 mod relay;
 mod sessions;
 mod sessions_panel;

@@ -8,8 +8,8 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, Global, WeakEntity, Window,
     WindowHandle,
 };
-use terminal_ext::osc::StatusState;
 use terminal::Terminal;
+use terminal_ext::osc::StatusState;
 use terminal_ext::{TerminalId, TerminalStatus};
 use terminal_view::TerminalView;
 use terminal_view::terminal_panel::TerminalPanel;
@@ -82,14 +82,15 @@ impl Sessions {
 
     /// Called on a terminal's `Wakeup`. Notifies the list when the status changed, and pops up when
     /// the terminal became blocked or done while its window is not active.
-    /// `view` is being updated (this runs from its terminal's subscription), so its title comes
-    /// from `terminal` and `view` is never read.
+    /// `view` and its `window` are being updated (this runs from its terminal's `subscribe_in`), so
+    /// its title comes from `terminal`, `view` is never read, and the window is reached through
+    /// `window`, never through its handle.
     pub(crate) fn status_maybe_changed(
         &mut self,
         view: &Entity<TerminalView>,
         terminal: &Entity<Terminal>,
         status: Option<TerminalStatus>,
-        window_active: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self
@@ -112,7 +113,7 @@ impl Sessions {
         let Some(status) = status else {
             return;
         };
-        if window_active
+        if window.is_window_active()
             || !should_notify(previous, status.state)
             || !crate::settings::notifications_enabled(cx)
         {
@@ -128,15 +129,24 @@ impl Sessions {
         }
         self.last_popup.insert(view.entity_id(), now);
         let terminal_title = terminal.read(cx).title(true);
-        self.pop_up(&status, terminal_title, view.downgrade(), main_window, cx);
+        self.pop_up(
+            &status,
+            terminal_title,
+            view.downgrade(),
+            main_window,
+            window,
+            cx,
+        );
     }
 
+    /// `window` is `main_window`, on gpui's stack: its handle would not reach it.
     fn pop_up(
         &mut self,
         status: &TerminalStatus,
         terminal_title: String,
         view: WeakEntity<TerminalView>,
         main_window: AnyWindowHandle,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(screen) = cx.primary_display() else {
@@ -162,9 +172,7 @@ impl Sessions {
             Ok(popup) => self.popups.push(popup),
             Err(error) => log::error!("fyx: cannot open a terminal notification: {error}"),
         }
-        main_window
-            .update(cx, |_, window, _| window.request_attention())
-            .ok();
+        window.request_attention();
     }
 
     /// The live view of a terminal and its window.

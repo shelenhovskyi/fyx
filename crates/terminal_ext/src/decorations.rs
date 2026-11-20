@@ -38,6 +38,11 @@ pub enum MenuEntry {
         checked: bool,
         on_select: Rc<dyn Fn(&mut Window, &mut App)>,
     },
+    /// A submenu of `entries`.
+    Submenu {
+        label: SharedString,
+        entries: Vec<MenuEntry>,
+    },
 }
 
 struct GlobalTerminalDecorations(Rc<dyn TerminalDecorations>);
